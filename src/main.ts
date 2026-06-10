@@ -11,6 +11,8 @@ import { Engine } from '@babylonjs/core/Engines/engine';
 import { Scene } from '@babylonjs/core/scene';
 import { Vector3 } from '@babylonjs/core/Maths/math.vector';
 import { Color3 } from '@babylonjs/core/Maths/math.color';
+// CollisionCoordinator side-effect: required for collision system to work.
+import '@babylonjs/core/Collisions/collisionCoordinator';
 
 import { createSky } from './sky';
 import { World } from './world';
@@ -31,11 +33,11 @@ import type { SaveData } from './types';
 const AUTO_SAVE_INTERVAL_MS = 60_000;
 
 /**
- * Per-frame gravity displacement for the camera's collision system. Babylon adds
- * this directly each move (it is not an acceleration), so a small value gives a
- * gentle, constant-speed fall onto the terrain.
+ * Gravity for the scene and camera collision system. This is applied directly
+ * to velocity each frame (not an acceleration), so it pulls the camera downward
+ * to keep it resting on the terrain. A value around -9.81 simulates Earth's gravity.
  */
-const SCENE_GRAVITY_Y = -0.15;
+const SCENE_GRAVITY_Y = -9.81;
 
 class Game {
   private readonly engine: Engine;
