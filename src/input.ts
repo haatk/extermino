@@ -11,11 +11,20 @@ export interface MoveAxis {
   z: number;
 }
 
+export interface LookRate {
+  /** Yaw rate: -1 (turn left) .. +1 (turn right). */
+  x: number;
+  /** Pitch rate: -1 (look up) .. +1 (look down). */
+  y: number;
+}
+
 export class InputManager {
   private readonly pressed = new Set<string>();
 
   /** Movement coming from the mobile joystick, if any. */
   private mobileMove: MoveAxis = { x: 0, z: 0 };
+  /** Look rate coming from the mobile right joystick, if any. */
+  private mobileLook: LookRate = { x: 0, y: 0 };
   private mobileJump = false;
   private mobileSprint = false;
 
@@ -41,9 +50,19 @@ export class InputManager {
     target.removeEventListener('blur', this.onBlur);
   }
 
-  /** Called by the mobile joystick overlay. */
+  /** Called by the mobile movement joystick overlay. */
   setMobileMove(axis: MoveAxis): void {
     this.mobileMove = axis;
+  }
+
+  /** Called by the mobile look joystick overlay. */
+  setMobileLook(rate: LookRate): void {
+    this.mobileLook = rate;
+  }
+
+  /** Current look rate from the mobile joystick (zero on desktop). */
+  getLookRate(): LookRate {
+    return this.mobileLook;
   }
 
   setMobileJump(active: boolean): void {

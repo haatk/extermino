@@ -132,14 +132,21 @@ export class UI {
   // --- Mobile controls ---------------------------------------------------
 
   private buildMobileControls(): void {
-    this.buildJoystick();
+    // Left stick moves; right stick looks (per CLAUDE.md).
+    this.buildJoystick('left', (x, y) => this.input.setMobileMove({ x, z: -y }));
+    this.buildJoystick('right', (x, y) => this.input.setMobileLook({ x, y }));
     this.buildJumpButton();
   }
 
-  private buildJoystick(): void {
+  /**
+   * Build a normalized virtual joystick anchored to the bottom-left or
+   * bottom-right. `onChange` receives each axis in [-1, 1] where +y is screen-down.
+   */
+  private buildJoystick(side: 'left' | 'right', onChange: (x: number, y: number) => void): void {
+    const anchor = side === 'left' ? 'left:24px;bottom:24px;' : 'right:24px;bottom:150px;';
     const base = el('div', {
       cssText:
-        'position:absolute;left:24px;bottom:24px;width:120px;height:120px;border-radius:50%;' +
+        `position:absolute;${anchor}width:120px;height:120px;border-radius:50%;` +
         'background:rgba(255,255,255,0.18);border:2px solid rgba(255,255,255,0.4);' +
         'pointer-events:auto;touch-action:none;',
     });
@@ -167,14 +174,13 @@ export class UI {
       }
       thumb.style.left = `${35 + dx}px`;
       thumb.style.top = `${35 + dy}px`;
-      // Screen down (+dy) means moving backward (-z).
-      this.input.setMobileMove({ x: dx / radius, z: -dy / radius });
+      onChange(dx / radius, dy / radius);
     };
 
     const reset = (): void => {
       thumb.style.left = '35px';
       thumb.style.top = '35px';
-      this.input.setMobileMove({ x: 0, z: 0 });
+      onChange(0, 0);
       activeId = null;
     };
 

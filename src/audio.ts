@@ -16,13 +16,18 @@ export interface AmbientTrack {
   volume: number;
 }
 
+const FADE_SECONDS = 2;
+
 const DEFAULT_TRACKS: AmbientTrack[] = [
-  { name: 'ambience', urls: ['/sounds/ambience.mp3', '/sounds/ambience.ogg'], volume: 0.5 },
-  { name: 'birds', urls: ['/sounds/birds.mp3', '/sounds/birds.ogg'], volume: 0.3 },
+  { name: 'music', urls: ['/sounds/music.mp3', '/sounds/music.ogg'], volume: 0.35 },
+  { name: 'birds', urls: ['/sounds/birds.mp3', '/sounds/birds.ogg'], volume: 0.4 },
+  { name: 'wind', urls: ['/sounds/wind.mp3', '/sounds/wind.ogg'], volume: 0.3 },
+  { name: 'stream', urls: ['/sounds/stream.mp3', '/sounds/stream.ogg'], volume: 0.25 },
 ];
 
 export class AudioManager {
   private readonly sounds: Sound[] = [];
+  private readonly targetVolume = new Map<Sound, number>();
   private unlocked = false;
 
   constructor(
@@ -40,9 +45,13 @@ export class AudioManager {
         track.name,
         track.urls[0] ?? null,
         this.scene,
-        null,
+        // Once the file is loaded, start it if the player has already interacted.
+        () => {
+          if (this.unlocked) this.fadeIn(sound, track.volume);
+        },
         { loop: true, autoplay: false, volume: track.volume },
       );
+      this.targetVolume.set(sound, track.volume);
       this.sounds.push(sound);
     }
 
@@ -52,17 +61,24 @@ export class AudioManager {
     window.addEventListener('touchstart', unlock, { once: true });
   }
 
-  /** Begin playback with a short fade-in. Called on first gesture. */
+  /** Begin playback with a fade-in. Called on the first user gesture. */
   private unlock(): void {
     if (this.unlocked) return;
     this.unlocked = true;
 
     for (const sound of this.sounds) {
       if (sound.isReady()) {
-        sound.play();
-        sound.setVolume(sound.getVolume(), 1.5); // fade in over 1.5s
+        this.fadeIn(sound, this.targetVolume.get(sound) ?? 1);
       }
+      // Sounds still loading start themselves via the readyToPlay callback above.
     }
+  }
+
+  /** Start a looping track silent and ramp it up to its target volume. */
+  private fadeIn(sound: Sound, target: number): void {
+    sound.setVolume(0);
+    sound.play();
+    sound.setVolume(target, FADE_SECONDS);
   }
 
   dispose(): void {

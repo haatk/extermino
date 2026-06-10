@@ -30,6 +30,13 @@ import type { SaveData } from './types';
 
 const AUTO_SAVE_INTERVAL_MS = 60_000;
 
+/**
+ * Per-frame gravity displacement for the camera's collision system. Babylon adds
+ * this directly each move (it is not an acceleration), so a small value gives a
+ * gentle, constant-speed fall onto the terrain.
+ */
+const SCENE_GRAVITY_Y = -0.15;
+
 class Game {
   private readonly engine: Engine;
   private scene: Scene | null = null;
@@ -53,10 +60,14 @@ class Game {
   }
 
   newGame(seed: string): void {
-    this.beginGame(seed, {
-      position: new Vector3(0, 0, 0),
-      rotationY: 0,
-    });
+    void this.beginGame(
+      seed,
+      {
+        position: new Vector3(0, 0, 0),
+        rotationY: 0,
+      },
+      true,
+    );
   }
 
   continueGame(): void {
@@ -79,19 +90,27 @@ class Game {
   }
 
   private restoreFromSave(save: SaveData): void {
-    this.beginGame(save.seed, {
-      position: new Vector3(save.playerPosition.x, save.playerPosition.y, save.playerPosition.z),
-      rotationY: save.playerRotation.y,
-    });
+    void this.beginGame(
+      save.seed,
+      {
+        position: new Vector3(save.playerPosition.x, save.playerPosition.y, save.playerPosition.z),
+        rotationY: save.playerRotation.y,
+      },
+      false,
+    );
   }
 
   /** Tear down any existing scene and build a fresh one for `seed`. */
-  private beginGame(seed: string, spawn: PlayerState): void {
+  private async beginGame(seed: string, spawn: PlayerState, freshSpawn: boolean): Promise<void> {
     this.disposeScene();
     this.currentSeed = seed;
 
     const scene = new Scene(this.engine);
     this.scene = scene;
+
+    // Collisions + gravity drive the player's contact with terrain and trees.
+    scene.collisionsEnabled = true;
+    scene.gravity = new Vector3(0, SCENE_GRAVITY_Y, 0);
 
     // Distance fog to soften the horizon.
     scene.fogMode = Scene.FOGMODE_EXP2;
@@ -99,15 +118,22 @@ class Game {
     scene.fogDensity = 0.0035;
 
     const sky = createSky(scene);
-    const world = new World(scene, seed, sky.shadowGenerator);
+    const world = await World.create(scene, seed, spawn.position, sky.shadowGenerator);
+
+    // A newer scene may have been requested while we awaited; if so, bail out.
+    if (this.scene !== scene) {
+      world.dispose();
+      scene.dispose();
+      return;
+    }
     this.world = world;
 
-    // Drop the player onto the terrain surface at spawn.
-    if (spawn.position.lengthSquared() === 0) {
-      spawn.position.y = world.getHeightAt(0, 0) + 1.7;
+    // Drop a freshly-spawned player above the surface so gravity seats them on it.
+    if (freshSpawn) {
+      spawn.position.y = world.getHeightAt(spawn.position.x, spawn.position.z) + 2;
     }
 
-    const player = new Player(scene, world, this.input, spawn);
+    const player = new Player(scene, this.input, spawn);
     player.attachControl(this.canvas);
     this.player = player;
 
@@ -118,6 +144,7 @@ class Game {
 
     scene.onBeforeRenderObservable.add(() => {
       const dt = Math.min(this.engine.getDeltaTime() / 1000, 0.1);
+      world.update(player.camera.position);
       player.update(dt);
     });
 
