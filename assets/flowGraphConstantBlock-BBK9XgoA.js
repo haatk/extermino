@@ -1,0 +1,2 @@
+import{F as s,a8 as e,a9 as u,t as o}from"./index-CZTiS8Sn.js";class l extends s{constructor(t){super(t),this.config=t,this.output=this.registerDataOutput("output",e(t.value))}_updateOutputs(t){this.output.setValue(this.config.value,t)}getClassName(){return"FlowGraphConstantBlock"}serialize(t={},a=u){super.serialize(t),a("value",this.config.value,t.config)}}o("FlowGraphConstantBlock",l);export{l as FlowGraphConstantBlock};
+//# sourceMappingURL=flowGraphConstantBlock-BBK9XgoA.js.map
