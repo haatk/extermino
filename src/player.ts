@@ -34,12 +34,12 @@ export class Player {
   private grounded = true;
 
   constructor(
-    private readonly _scene: Scene,
+    scene: Scene,
     private readonly world: World,
     private readonly input: InputManager,
     spawn: PlayerState,
   ) {
-    this.camera = new UniversalCamera('playerCamera', spawn.position.clone(), _scene);
+    this.camera = new UniversalCamera('playerCamera', spawn.position.clone(), scene);
     this.camera.rotation.y = spawn.rotationY;
     this.camera.minZ = 0.1;
     this.camera.fov = 1.1;
