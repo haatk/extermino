@@ -37,18 +37,20 @@ const WORLD = {
   /** Grid subdivisions per chunk — higher = smoother hills, heavier mesh. */
   chunkSubdivisions: 24,
   /** How many chunks out from the player's chunk to keep loaded (radius). */
-  loadRadius: 2,
+  loadRadius: 1,
   /** Within this chunk radius, trees cast shadows; beyond it they do not. */
-  shadowRadius: 1,
+  shadowRadius: 0,
   /** Horizontal scale of the noise (smaller = broader, gentler hills). */
   noiseScale: 0.012,
   /** Peak-to-trough terrain height. */
   heightAmplitude: 14,
   /** Trees per chunk (inclusive range), chosen deterministically per chunk. */
   treesPerChunkMin: 6,
-  treesPerChunkMax: 16,
+  treesPerChunkMax: 10,
   /** Keep trees out of this radius around the world origin (spawn point). */
   spawnClearRadius: 8,
+  /** Maximum distance from player at which trees are visible (for culling). */
+  treeCullDistance: 80,
 } as const;
 
 /** The two tree species we place. */
@@ -132,7 +134,8 @@ export class World {
   /**
    * Stream chunks around the player: build any newly-needed chunks, dispose any
    * that have fallen outside the load radius, and toggle tree shadow-casting so
-   * only nearby trees cast. Cheap to call every frame.
+   * only nearby trees cast. Cull tree instances beyond the render distance.
+   * Cheap to call every frame.
    */
   update(playerPos: Vector3): void {
     const pcx = Math.floor(playerPos.x / WORLD.chunkSize);
@@ -158,6 +161,17 @@ export class World {
       if (Math.abs(chunk.cx - pcx) > WORLD.loadRadius || Math.abs(chunk.cz - pcz) > WORLD.loadRadius) {
         this.disposeChunk(chunk);
         this.chunks.delete(key);
+      }
+    }
+
+    // Distance-based instance culling: hide trees beyond the cull distance.
+    const cullDistSq = WORLD.treeCullDistance * WORLD.treeCullDistance;
+    for (const chunk of this.chunks.values()) {
+      for (const instance of chunk.instances) {
+        const dx = instance.position.x - playerPos.x;
+        const dz = instance.position.z - playerPos.z;
+        const distSq = dx * dx + dz * dz;
+        instance.isVisible = distSq <= cullDistSq;
       }
     }
   }
