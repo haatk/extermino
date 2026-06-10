@@ -1,2 +1,0 @@
-import{x as t,t as n}from"./index-z-tJxPFa.js";class a extends t{constructor(){super(...arguments),this.initPriority=-1,this.type="SceneReady"}_executeEvent(e,s){return this._execute(e),!0}_preparePendingTasks(e){}_cancelPendingTasks(e){}getClassName(){return"FlowGraphSceneReadyEventBlock"}}n("FlowGraphSceneReadyEventBlock",a);export{a as FlowGraphSceneReadyEventBlock};
-//# sourceMappingURL=flowGraphSceneReadyEventBlock-RCyfwlPH.js.map
