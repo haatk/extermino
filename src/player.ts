@@ -22,7 +22,7 @@ const PLAYER = {
   /** Collision capsule half-extents (x/z radius, y half-height). */
   ellipsoid: new Vector3(0.7, 0.9, 0.7),
   /** Offset so the camera sits at roughly eye level above the capsule centre. */
-  ellipsoidOffset: new Vector3(0, 0.9, 0),
+  ellipsoidOffset: new Vector3(0, 1.8, 0),
   /** Look speed for the mobile right joystick, in radians/second at full tilt. */
   lookSpeed: 2.6,
   /** Clamp pitch so the player can't flip the camera over. */
