@@ -37,7 +37,7 @@ const AUTO_SAVE_INTERVAL_MS = 60_000;
  * to velocity each frame (not an acceleration), so it pulls the camera downward
  * to keep it resting on the terrain. A value around -9.81 simulates Earth's gravity.
  */
-const SCENE_GRAVITY_Y = -9.81;
+const SCENE_GRAVITY_Y = -0.5;
 
 class Game {
   private readonly engine: Engine;
