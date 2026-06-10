@@ -212,6 +212,8 @@ export class World {
       }
       ground.updateVerticesData(VertexBuffer.PositionKind, positions);
       ground.createNormals(true);
+      ground.bakeCurrentTransformIntoVertices();
+      ground.position.setAll(0);
     }
 
     ground.material = this.grassMaterial;
