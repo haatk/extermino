@@ -26,6 +26,8 @@ import type { ShadowGenerator } from '@babylonjs/core/Lights/Shadows/shadowGener
 
 // Register the glTF loader so SceneLoader can import .glb tree models.
 import '@babylonjs/loaders/glTF';
+// CollisionCoordinator side-effect: required for collision system initialization.
+import '@babylonjs/core/Collisions/collisionCoordinator';
 
 import { ValueNoise2D } from './noise';
 import { createRng, randomRange, randomInt, type RandomFn } from './rng';
@@ -309,8 +311,8 @@ function chunkKey(cx: number, cz: number): string {
 
 /**
  * PBR grass material built from the texture set in `public/textures/`. If the
- * files are absent the textures simply fail to load and the flat albedo colour
- * shows through, so the world still renders.
+ * files are absent, the textures fail to load silently and the flat albedo
+ * colour shows through, so the world still renders.
  */
 function createGrassMaterial(scene: Scene): PBRMaterial {
   const mat = new PBRMaterial('grassMat', scene);
@@ -326,13 +328,21 @@ function createGrassMaterial(scene: Scene): PBRMaterial {
     return tex;
   };
 
-  mat.albedoTexture = tiled('/textures/grass_albedo.jpg');
-  mat.bumpTexture = tiled('/textures/grass_normal.jpg');
-  // Roughness packed in the green channel of the metallic texture (glTF style).
-  mat.metallicTexture = tiled('/textures/grass_roughness.jpg');
-  mat.useRoughnessFromMetallicTextureAlpha = false;
-  mat.useRoughnessFromMetallicTextureGreen = true;
-  mat.ambientTexture = tiled('/textures/grass_ao.jpg');
+  // Load textures with fallback to flat color if files are missing.
+  // Babylon.js silently degrades missing textures, so the fallback color
+  // (set above) will be used if any texture fails to load.
+  try {
+    mat.albedoTexture = tiled('/textures/grass_albedo.jpg');
+    mat.bumpTexture = tiled('/textures/grass_normal.jpg');
+    // Roughness packed in the green channel of the metallic texture (glTF style).
+    mat.metallicTexture = tiled('/textures/grass_roughness.jpg');
+    mat.useRoughnessFromMetallicTextureAlpha = false;
+    mat.useRoughnessFromMetallicTextureGreen = true;
+    mat.ambientTexture = tiled('/textures/grass_ao.jpg');
+  } catch (err) {
+    // If texture creation fails, the fallback color is already set.
+    console.warn('Grass textures unavailable, using fallback color:', err);
+  }
 
   return mat;
 }
@@ -360,12 +370,15 @@ async function loadTreePrototype(
         canopy.name = `proto_${species}_canopy`;
         parkPrototype(canopy);
         const trunk = buildTrunkMesh(scene, species, trunkColor);
+        console.log(`Loaded tree model: ${species}.glb`);
         return { trunk, canopy, trunkVisible: false };
       }
     }
-  } catch {
+  } catch (err) {
     // Fall through to the procedural fallback below.
+    console.warn(`Failed to load tree model ${species}.glb, using procedural fallback:`, err);
   }
+  console.log(`Using procedural tree prototype for: ${species}`);
   return buildProceduralPrototype(scene, species, trunkColor, leafColor);
 }
 
