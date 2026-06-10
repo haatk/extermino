@@ -1,163 +1,415 @@
 /**
  * Procedural world generation: terrain and trees, all derived deterministically
  * from the seed. Re-running with the same seed produces an identical world.
+ *
+ * The world streams in chunk by chunk around the player: terrain tiles and their
+ * trees are built when the player nears them and disposed once they fall outside
+ * the load radius, so memory and draw calls stay bounded no matter how far the
+ * player roams. Trees are drawn with `InstancedMesh` (one prototype per species)
+ * and their trunks act as collision bodies.
  */
 
 import type { Scene } from '@babylonjs/core/scene';
-import { Vector3 } from '@babylonjs/core/Maths/math.vector';
+import { Vector3, Matrix } from '@babylonjs/core/Maths/math.vector';
 import { Color3 } from '@babylonjs/core/Maths/math.color';
-import type { Mesh } from '@babylonjs/core/Meshes/mesh';
+import { Mesh } from '@babylonjs/core/Meshes/mesh';
+import type { InstancedMesh } from '@babylonjs/core/Meshes/instancedMesh';
 import { CreateGround } from '@babylonjs/core/Meshes/Builders/groundBuilder';
 import { CreateCylinder } from '@babylonjs/core/Meshes/Builders/cylinderBuilder';
 import { CreateSphere } from '@babylonjs/core/Meshes/Builders/sphereBuilder';
 import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
+import { PBRMaterial } from '@babylonjs/core/Materials/PBR/pbrMaterial';
+import { Texture } from '@babylonjs/core/Materials/Textures/texture';
+import { SceneLoader } from '@babylonjs/core/Loading/sceneLoader';
 import { VertexBuffer } from '@babylonjs/core/Buffers/buffer';
 import type { ShadowGenerator } from '@babylonjs/core/Lights/Shadows/shadowGenerator';
+
+// Register the glTF loader so SceneLoader can import .glb tree models.
+import '@babylonjs/loaders/glTF';
 
 import { ValueNoise2D } from './noise';
 import { createRng, randomRange, randomInt, type RandomFn } from './rng';
 
-/** Tunables for terrain shape and tree distribution. */
+/** Tunables for terrain shape, chunk streaming and tree distribution. */
 const WORLD = {
-  /** Side length of the terrain plane, in world units. */
-  size: 400,
-  /** Grid subdivisions — higher = smoother hills, heavier mesh. */
-  subdivisions: 200,
+  /** Side length of one terrain chunk, in world units. */
+  chunkSize: 64,
+  /** Grid subdivisions per chunk — higher = smoother hills, heavier mesh. */
+  chunkSubdivisions: 24,
+  /** How many chunks out from the player's chunk to keep loaded (radius). */
+  loadRadius: 2,
+  /** Within this chunk radius, trees cast shadows; beyond it they do not. */
+  shadowRadius: 1,
   /** Horizontal scale of the noise (smaller = broader, gentler hills). */
   noiseScale: 0.012,
   /** Peak-to-trough terrain height. */
   heightAmplitude: 14,
-  /** Number of placeholder trees to scatter. */
-  treeCount: 120,
-  /** Keep trees out of this radius around the spawn point. */
+  /** Trees per chunk (inclusive range), chosen deterministically per chunk. */
+  treesPerChunkMin: 6,
+  treesPerChunkMax: 16,
+  /** Keep trees out of this radius around the world origin (spawn point). */
   spawnClearRadius: 8,
 } as const;
 
+/** The two tree species we place. */
+type Species = 'oak' | 'birch';
+const SPECIES: readonly Species[] = ['oak', 'birch'];
+
+/**
+ * A reusable prototype that instances are cloned from. `trunk` is always the
+ * collision body; when a GLB canopy supplies the visuals the trunk instances are
+ * kept invisible (`trunkVisible = false`). `canopy` carries the foliage geometry
+ * and casts the shadow.
+ */
+interface TreePrototype {
+  trunk: Mesh;
+  canopy: Mesh;
+  trunkVisible: boolean;
+}
+
+/** A single loaded chunk: its terrain tile plus the tree instances on it. */
+interface Chunk {
+  cx: number;
+  cz: number;
+  ground: Mesh;
+  instances: InstancedMesh[];
+  /** Instances that should cast shadows while this chunk is near the player. */
+  casters: InstancedMesh[];
+  casting: boolean;
+}
+
 export class World {
   readonly seed: string;
-  readonly terrain: Mesh;
 
   private readonly noise: ValueNoise2D;
-  private readonly trees: Mesh[] = [];
+  private readonly chunks = new Map<string, Chunk>();
+  private readonly prototypes: Record<Species, TreePrototype>;
+  private readonly grassMaterial: PBRMaterial;
 
-  constructor(scene: Scene, seed: string, shadowGenerator?: ShadowGenerator) {
+  private constructor(
+    private readonly scene: Scene,
+    seed: string,
+    prototypes: Record<Species, TreePrototype>,
+    grassMaterial: PBRMaterial,
+    private readonly shadowGenerator?: ShadowGenerator,
+  ) {
     this.seed = seed;
     this.noise = new ValueNoise2D(`${seed}:terrain`);
-
-    this.terrain = this.buildTerrain(scene);
-    if (shadowGenerator) {
-      this.terrain.receiveShadows = true;
-    }
-
-    this.scatterTrees(scene, shadowGenerator);
+    this.prototypes = prototypes;
+    this.grassMaterial = grassMaterial;
   }
 
   /**
-   * Height of the terrain at world-space (x, z). Used both to displace the mesh
-   * and to keep the player grounded. The two must agree, so they share this one
-   * function.
+   * Async factory: loads (or falls back to building) the shared tree prototypes
+   * and grass material, then streams in the chunks around the spawn point so the
+   * player has ground beneath them immediately.
+   */
+  static async create(
+    scene: Scene,
+    seed: string,
+    spawn: Vector3,
+    shadowGenerator?: ShadowGenerator,
+  ): Promise<World> {
+    const grassMaterial = createGrassMaterial(scene);
+    const prototypes: Record<Species, TreePrototype> = {
+      oak: await loadTreePrototype(scene, 'oak', new Color3(0.4, 0.27, 0.16), new Color3(0.17, 0.4, 0.18)),
+      birch: await loadTreePrototype(scene, 'birch', new Color3(0.82, 0.82, 0.78), new Color3(0.4, 0.6, 0.28)),
+    };
+
+    const world = new World(scene, seed, prototypes, grassMaterial, shadowGenerator);
+    world.update(spawn);
+    return world;
+  }
+
+  /**
+   * Height of the terrain at world-space (x, z). Used to displace the mesh, to
+   * seat trees on the ground, and to drop the player onto the surface at spawn.
    */
   getHeightAt(x: number, z: number): number {
     return this.noise.fbm(x * WORLD.noiseScale, z * WORLD.noiseScale) * WORLD.heightAmplitude;
   }
 
-  private buildTerrain(scene: Scene): Mesh {
+  /**
+   * Stream chunks around the player: build any newly-needed chunks, dispose any
+   * that have fallen outside the load radius, and toggle tree shadow-casting so
+   * only nearby trees cast. Cheap to call every frame.
+   */
+  update(playerPos: Vector3): void {
+    const pcx = Math.floor(playerPos.x / WORLD.chunkSize);
+    const pcz = Math.floor(playerPos.z / WORLD.chunkSize);
+
+    // Load the disc of chunks within loadRadius of the player's chunk.
+    for (let dz = -WORLD.loadRadius; dz <= WORLD.loadRadius; dz++) {
+      for (let dx = -WORLD.loadRadius; dx <= WORLD.loadRadius; dx++) {
+        const cx = pcx + dx;
+        const cz = pcz + dz;
+        const key = chunkKey(cx, cz);
+        let chunk = this.chunks.get(key);
+        if (!chunk) {
+          chunk = this.buildChunk(cx, cz);
+          this.chunks.set(key, chunk);
+        }
+        this.setChunkCasting(chunk, Math.max(Math.abs(dx), Math.abs(dz)) <= WORLD.shadowRadius);
+      }
+    }
+
+    // Unload chunks the player has left behind.
+    for (const [key, chunk] of this.chunks) {
+      if (Math.abs(chunk.cx - pcx) > WORLD.loadRadius || Math.abs(chunk.cz - pcz) > WORLD.loadRadius) {
+        this.disposeChunk(chunk);
+        this.chunks.delete(key);
+      }
+    }
+  }
+
+  private buildChunk(cx: number, cz: number): Chunk {
+    const ground = this.buildTerrainTile(cx, cz);
+    const { instances, casters } = this.scatterTrees(cx, cz);
+    return { cx, cz, ground, instances, casters, casting: false };
+  }
+
+  /** Build one displaced, collidable terrain tile for chunk (cx, cz). */
+  private buildTerrainTile(cx: number, cz: number): Mesh {
     const ground = CreateGround(
-      'terrain',
+      `terrain_${cx}_${cz}`,
       {
-        width: WORLD.size,
-        height: WORLD.size,
-        subdivisions: WORLD.subdivisions,
+        width: WORLD.chunkSize,
+        height: WORLD.chunkSize,
+        subdivisions: WORLD.chunkSubdivisions,
         updatable: true,
       },
-      scene,
+      this.scene,
     );
+    // Centre the tile on its chunk; the ground builder centres the mesh on origin.
+    ground.position.set(cx * WORLD.chunkSize + WORLD.chunkSize / 2, 0, cz * WORLD.chunkSize + WORLD.chunkSize / 2);
 
-    // Displace each vertex vertically by the shared height function.
+    // Displace each vertex by the shared world-space height function so adjacent
+    // tiles line up seamlessly along their shared edge.
     const positions = ground.getVerticesData(VertexBuffer.PositionKind);
     if (positions) {
+      const baseX = ground.position.x;
+      const baseZ = ground.position.z;
       for (let i = 0; i < positions.length; i += 3) {
-        const x = positions[i] ?? 0;
-        const z = positions[i + 2] ?? 0;
-        positions[i + 1] = this.getHeightAt(x, z);
+        const worldX = (positions[i] ?? 0) + baseX;
+        const worldZ = (positions[i + 2] ?? 0) + baseZ;
+        positions[i + 1] = this.getHeightAt(worldX, worldZ);
       }
       ground.updateVerticesData(VertexBuffer.PositionKind, positions);
       ground.createNormals(true);
     }
 
-    // Placeholder grassland material until the PBR grass textures land.
-    const grass = new StandardMaterial('grassMat', scene);
-    grass.diffuseColor = new Color3(0.33, 0.55, 0.27);
-    grass.specularColor = new Color3(0.02, 0.02, 0.02);
-    ground.material = grass;
-
+    ground.material = this.grassMaterial;
+    ground.checkCollisions = true;
+    if (this.shadowGenerator) {
+      ground.receiveShadows = true;
+    }
     return ground;
   }
 
-  private scatterTrees(scene: Scene, shadowGenerator?: ShadowGenerator): void {
-    // A dedicated RNG stream for tree placement keeps it independent of any
-    // other seed-derived randomness we add later.
-    const rng: RandomFn = createRng(`${this.seed}:trees`);
+  /** Place this chunk's trees as instances of the shared species prototypes. */
+  private scatterTrees(cx: number, cz: number): { instances: InstancedMesh[]; casters: InstancedMesh[] } {
+    const rng: RandomFn = createRng(`${this.seed}:chunk:${cx}:${cz}`);
+    const originX = cx * WORLD.chunkSize;
+    const originZ = cz * WORLD.chunkSize;
 
-    const trunkMat = new StandardMaterial('trunkMat', scene);
-    trunkMat.diffuseColor = new Color3(0.4, 0.26, 0.15);
-    trunkMat.specularColor = new Color3(0, 0, 0);
+    const count = randomInt(rng, WORLD.treesPerChunkMin, WORLD.treesPerChunkMax);
+    const instances: InstancedMesh[] = [];
+    const casters: InstancedMesh[] = [];
 
-    const leafMat = new StandardMaterial('leafMat', scene);
-    leafMat.diffuseColor = new Color3(0.18, 0.42, 0.2);
-    leafMat.specularColor = new Color3(0, 0, 0);
+    for (let i = 0; i < count; i++) {
+      const x = originX + randomRange(rng, 0, WORLD.chunkSize);
+      const z = originZ + randomRange(rng, 0, WORLD.chunkSize);
 
-    const half = WORLD.size / 2;
-
-    for (let i = 0; i < WORLD.treeCount; i++) {
-      const x = randomRange(rng, -half, half);
-      const z = randomRange(rng, -half, half);
-
-      // Leave the spawn area clear.
+      // Keep the spawn area around the world origin clear.
       if (Math.hypot(x, z) < WORLD.spawnClearRadius) {
         continue;
       }
 
       const y = this.getHeightAt(x, z);
       const scale = randomRange(rng, 0.8, 1.6);
-      const trunkHeight = randomRange(rng, 2.5, 4) * scale;
-      const canopyRadius = randomRange(rng, 1.4, 2.4) * scale;
       const rotation = randomRange(rng, 0, Math.PI * 2);
-      const species = randomInt(rng, 0, 1); // 0 = oak-ish, 1 = birch-ish
+      const species = SPECIES[randomInt(rng, 0, SPECIES.length - 1)] ?? 'oak';
+      const proto = this.prototypes[species];
 
-      const trunk = CreateCylinder(
-        `tree_trunk_${i}`,
-        { height: trunkHeight, diameterTop: 0.3 * scale, diameterBottom: 0.5 * scale, tessellation: 6 },
-        scene,
-      );
-      trunk.position = new Vector3(x, y + trunkHeight / 2, z);
+      const trunk = proto.trunk.createInstance(`trunk_${cx}_${cz}_${i}`);
+      trunk.position.set(x, y, z);
+      trunk.scaling.setAll(scale);
       trunk.rotation.y = rotation;
-      trunk.material = trunkMat;
+      trunk.isVisible = proto.trunkVisible;
+      // The trunk doubles as the tree's collision body.
+      trunk.checkCollisions = true;
 
-      const canopy = CreateSphere(
-        `tree_canopy_${i}`,
-        { diameter: canopyRadius * 2, segments: 6 },
-        scene,
-      );
-      canopy.position = new Vector3(x, y + trunkHeight + canopyRadius * 0.6, z);
-      canopy.scaling.y = species === 1 ? 1.4 : 1.0; // birches a touch taller
-      canopy.material = leafMat;
-      canopy.parent = trunk;
+      const canopy = proto.canopy.createInstance(`canopy_${cx}_${cz}_${i}`);
+      canopy.position.set(x, y, z);
+      canopy.scaling.setAll(scale);
+      canopy.rotation.y = rotation;
 
-      if (shadowGenerator) {
-        shadowGenerator.addShadowCaster(trunk);
-        shadowGenerator.addShadowCaster(canopy);
-      }
-
-      this.trees.push(trunk);
+      instances.push(trunk, canopy);
+      // Only the foliage casts shadows — cheaper and avoids thin trunk artifacts.
+      casters.push(canopy);
     }
+
+    return { instances, casters };
+  }
+
+  /** Toggle whether a chunk's trees cast shadows (only nearby ones should). */
+  private setChunkCasting(chunk: Chunk, casting: boolean): void {
+    if (!this.shadowGenerator || chunk.casting === casting) return;
+    chunk.casting = casting;
+    for (const mesh of chunk.casters) {
+      if (casting) {
+        this.shadowGenerator.addShadowCaster(mesh);
+      } else {
+        this.shadowGenerator.removeShadowCaster(mesh);
+      }
+    }
+  }
+
+  private disposeChunk(chunk: Chunk): void {
+    this.setChunkCasting(chunk, false);
+    for (const inst of chunk.instances) {
+      inst.dispose();
+    }
+    chunk.ground.dispose();
   }
 
   dispose(): void {
-    this.terrain.dispose();
-    for (const tree of this.trees) {
-      tree.dispose(false, true);
+    for (const chunk of this.chunks.values()) {
+      this.disposeChunk(chunk);
     }
-    this.trees.length = 0;
+    this.chunks.clear();
+    for (const species of SPECIES) {
+      this.prototypes[species].trunk.dispose();
+      this.prototypes[species].canopy.dispose();
+    }
+    this.grassMaterial.dispose();
   }
+}
+
+// --- Asset loading --------------------------------------------------------
+
+/** Key a chunk by its integer chunk coordinates. */
+function chunkKey(cx: number, cz: number): string {
+  return `${cx},${cz}`;
+}
+
+/**
+ * PBR grass material built from the texture set in `public/textures/`. If the
+ * files are absent the textures simply fail to load and the flat albedo colour
+ * shows through, so the world still renders.
+ */
+function createGrassMaterial(scene: Scene): PBRMaterial {
+  const mat = new PBRMaterial('grassMat', scene);
+  mat.albedoColor = new Color3(0.33, 0.55, 0.27);
+  mat.metallic = 0;
+  mat.roughness = 1;
+
+  const tile = WORLD.chunkSize / 8; // texture repeats across one chunk
+  const tiled = (url: string): Texture => {
+    const tex = new Texture(url, scene);
+    tex.uScale = tile;
+    tex.vScale = tile;
+    return tex;
+  };
+
+  mat.albedoTexture = tiled('/textures/grass_albedo.jpg');
+  mat.bumpTexture = tiled('/textures/grass_normal.jpg');
+  // Roughness packed in the green channel of the metallic texture (glTF style).
+  mat.metallicTexture = tiled('/textures/grass_roughness.jpg');
+  mat.useRoughnessFromMetallicTextureAlpha = false;
+  mat.useRoughnessFromMetallicTextureGreen = true;
+  mat.ambientTexture = tiled('/textures/grass_ao.jpg');
+
+  return mat;
+}
+
+/**
+ * Load a GLB tree model from `public/models/` to use as an instancing source.
+ * The visible foliage comes from the GLB; an invisible procedural cylinder backs
+ * it as a clean collision body. If the model is missing we fall back to a fully
+ * procedural trunk + canopy so the world is never empty.
+ */
+async function loadTreePrototype(
+  scene: Scene,
+  species: Species,
+  trunkColor: Color3,
+  leafColor: Color3,
+): Promise<TreePrototype> {
+  try {
+    const result = await SceneLoader.ImportMeshAsync('', '/models/', `${species}.glb`, scene);
+    const renderable = result.meshes.filter(
+      (m): m is Mesh => m instanceof Mesh && m.getTotalVertices() > 0,
+    );
+    if (renderable.length > 0) {
+      const canopy = Mesh.MergeMeshes(renderable, true, true, undefined, false, true);
+      if (canopy) {
+        canopy.name = `proto_${species}_canopy`;
+        parkPrototype(canopy);
+        const trunk = buildTrunkMesh(scene, species, trunkColor);
+        return { trunk, canopy, trunkVisible: false };
+      }
+    }
+  } catch {
+    // Fall through to the procedural fallback below.
+  }
+  return buildProceduralPrototype(scene, species, trunkColor, leafColor);
+}
+
+/** A lightweight trunk + canopy prototype, used when no GLB model is present. */
+function buildProceduralPrototype(
+  scene: Scene,
+  species: Species,
+  trunkColor: Color3,
+  leafColor: Color3,
+): TreePrototype {
+  const trunk = buildTrunkMesh(scene, species, trunkColor);
+
+  const leafMat = new StandardMaterial(`proto_${species}_leafMat`, scene);
+  leafMat.diffuseColor = leafColor;
+  leafMat.specularColor = new Color3(0, 0, 0);
+
+  const canopyRadius = species === 'birch' ? 1.7 : 2.1;
+  const canopy = CreateSphere(`proto_${species}_canopy`, { diameter: canopyRadius * 2, segments: 8 }, scene);
+  // Seat the canopy above the trunk; the trunk base sits at the instance origin.
+  canopy.bakeTransformIntoVertices(Matrix.Translation(0, TRUNK_HEIGHT + canopyRadius * 0.5, 0));
+  if (species === 'birch') {
+    canopy.scaling.y = 1.3; // birches a touch taller and narrower
+  }
+  canopy.material = leafMat;
+  parkPrototype(canopy);
+
+  return { trunk, canopy, trunkVisible: true };
+}
+
+const TRUNK_HEIGHT = 3.2;
+
+/** Build a trunk cylinder whose base sits at the local origin (y = 0). */
+function buildTrunkMesh(scene: Scene, species: Species, trunkColor: Color3): Mesh {
+  const trunk = CreateCylinder(
+    `proto_${species}_trunk`,
+    { height: TRUNK_HEIGHT, diameterTop: 0.3, diameterBottom: 0.5, tessellation: 6 },
+    scene,
+  );
+  // The builder centres the cylinder on its origin; lift it so the base is at y=0.
+  trunk.bakeTransformIntoVertices(Matrix.Translation(0, TRUNK_HEIGHT / 2, 0));
+
+  const trunkMat = new StandardMaterial(`proto_${species}_trunkMat`, scene);
+  trunkMat.diffuseColor = trunkColor;
+  trunkMat.specularColor = new Color3(0, 0, 0);
+  trunk.material = trunkMat;
+
+  parkPrototype(trunk);
+  return trunk;
+}
+
+/**
+ * Park a prototype mesh far off-world so it never appears as a stray tree near
+ * the player. We keep it enabled and `alwaysSelectAsActiveMesh` so that its
+ * instances — which live at their own positions — are reliably rendered every
+ * frame regardless of where the prototype itself sits. Per-instance `isVisible`
+ * then controls whether each clone is drawn.
+ */
+function parkPrototype(mesh: Mesh): void {
+  mesh.position.set(0, -10000, 0);
+  mesh.alwaysSelectAsActiveMesh = true;
 }
